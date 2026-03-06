@@ -15,7 +15,8 @@
 #include "ggml-impl.h"
 #include "ggml-xlns.h"
 
-#define xlns16_ideal
+#define xlns16_alt
+#define xlns16_table
 #include "xlns16.cpp"
 
 #include <string>
@@ -40,6 +41,51 @@ static void ggml_backend_xlns_free(ggml_backend_t backend) {
     delete backend; // There's no context so only backend should be freed
 } 
 
+void matmul_xlns16_float(const float *A, const float *B, float *C, int64_t M, int64_t N, int64_t K)
+{
+    for (int i = 0; i < M; i++)
+    {
+        for (int j = 0; j < K; j++)
+        {
+            xlns16_float sum = float2xlns16_(0.0f);
+
+            for (int k = 0; k < N; k++)
+            {
+                sum += float2xlns16_(A[i * N + k]) * float2xlns16_(B[j * N + k]);
+            }
+            C[j * M + i] = xlns16_2float(sum);
+        }
+    }
+}
+
+static void ggml_backend_xlns_mul_mat(struct ggml_tensor * dst) {
+    static bool has_printed = false;
+    if (!has_printed) {
+        printf("\n");
+        printf("\033[1;36m============================================================\033[0m\n");
+        printf("\033[1;32m      🚀 XLNS-16 VIRTUAL HARDWARE ACCELERATOR ONLINE 🚀     \033[0m\n");
+        printf("\033[1;36m============================================================\033[0m\n");
+        printf("\033[1;33m  >>> Intercepting GGML_OP_MUL_MAT with Logarithmic Math <<<\033[0m\n\n");
+        has_printed = true; // Never print this again for the rest of the run
+    }
+    
+    const struct ggml_tensor * src0 = dst->src[0]; 
+    const struct ggml_tensor * src1 = dst->src[1]; 
+
+    // Extract ggml dimensions
+    const int64_t ggml_K = src0->ne[0]; // Inner dimension
+    const int64_t ggml_M = src0->ne[1]; // Rows in A
+    const int64_t ggml_N = src1->ne[1]; // Columns in B (Batch size)
+
+    // Extract raw memory pointers
+    const float * A = (const float *) src0->data;
+    const float * B = (const float *) src1->data;
+    float       * C = (float *)       dst->data;
+
+    // M = rows (ggml_M), N = inner dim (ggml_K), K = batch (ggml_N)
+    matmul_xlns16_float(A, B, C, ggml_M, ggml_K, ggml_N);
+}
+
 static enum ggml_status ggml_backend_xlns_graph_compute(ggml_backend_t backend, struct ggml_cgraph * cgraph) {
     
     // Iterate through every operation in the computation graph linearly
@@ -48,56 +94,7 @@ static enum ggml_status ggml_backend_xlns_graph_compute(ggml_backend_t backend, 
 
         switch (node->op) {
             case GGML_OP_MUL_MAT: {
-                printf("\n>>> SUCCESS: LNS Matrix Multiplication Intercepted! <<<\n");
-                
-                // 1. EXTRACT TENSORS
-                // In ggml, src0 is Matrix A (Weights), src1 is Matrix B (Tokens)
-                // The 'node' itself acts as the destination tensor (Matrix C)
-                const struct ggml_tensor * src0 = node->src[0]; 
-                const struct ggml_tensor * src1 = node->src[1]; 
-                struct ggml_tensor * dst        = node;         
-
-                // 2. EXTRACT DIMENSIONS
-                // ggml ne[0] is the inner dimension (columns), ne[1] is rows.
-                const int64_t K = src0->ne[0]; // Number of columns in A (and rows in B)
-                const int64_t M = src0->ne[1]; // Number of rows in A
-                const int64_t N = src1->ne[1]; // Number of columns in B (Batch size)
-
-                // 3. GET RAW MEMORY POINTERS
-                // For this simplest PoC, we assume the data is standard 32-bit floats.
-                // (If you successfully convert them in Phase 2, you'd cast to xlns16_float* here)
-                const float * data_A = (const float *) src0->data;
-                const float * data_B = (const float *) src1->data;
-                float       * data_C = (float *)       dst->data;
-
-                // 4. THE LNS MATH LOOP (Single-Threaded)
-                // We iterate through the output matrix dimensions
-                for (int64_t j = 0; j < N; ++j) {       // Columns of output
-                    for (int64_t i = 0; i < M; ++i) {   // Rows of output
-                        
-                        // Initialize xlnscpp accumulator
-                        xlns16_float sum_lns;
-                        sum_lns = 0.0f; 
-
-                        // The Dot Product
-                        for (int64_t k = 0; k < K; ++k) {
-                            
-                            // Map 2D coordinates to 1D array indices (Row-Major Order)
-                            float a_val = data_A[i * K + k]; 
-                            float b_val = data_B[j * K + k]; 
-
-                            // Convert standard FP32 to xlns16_float via overloaded assignment
-                            xlns16_float a_lns; a_lns = a_val;
-                            xlns16_float b_lns; b_lns = b_val;
-
-                            // Perform LNS multiplication and addition
-                            sum_lns += (a_lns * b_lns); 
-                        }
-
-                        // Convert LNS result back to FP32 and store in output tensor
-                        data_C[j * M + i] = xlns16_2float(sum_lns);
-                    }
-                }
+                ggml_backend_xlns_mul_mat(node);
                 break;
             }
 
@@ -156,6 +153,8 @@ static const char * ggml_backend_xlns_device_get_name(ggml_backend_dev_t dev) {
 
 static const char * ggml_backend_xlns_device_get_description(ggml_backend_dev_t dev) {
     return "xlns16 Virtual Machine";
+
+    GGML_UNUSED(dev);
 }
 
 static void ggml_backend_xlns_device_get_memory(ggml_backend_dev_t dev, size_t * free, size_t * total) {
