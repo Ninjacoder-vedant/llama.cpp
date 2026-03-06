@@ -186,6 +186,7 @@ option(GGML_CPU                             "ggml: enable CPU backend"          
 option(GGML_SCHED_NO_REALLOC                "ggml: disallow reallocations in ggml-alloc (for debugging)" OFF)
 
 # 3rd party libs / backends
+option(GGML_XLNS                            "ggml: build with XLNS (LNS) support"             OFF)
 option(GGML_ACCELERATE                      "ggml: enable Accelerate framework"               ON)
 option(GGML_BLAS                            "ggml: use BLAS"                                  ${GGML_BLAS_DEFAULT})
 set(GGML_BLAS_VENDOR ${GGML_BLAS_VENDOR_DEFAULT} CACHE STRING
@@ -327,6 +328,7 @@ set(GGML_PUBLIC_HEADERS
     include/ggml-vulkan.h
     include/ggml-webgpu.h
     include/ggml-zendnn.h
+    include/ggml-xlns.h
     include/gguf.h)
 
 set_target_properties(ggml PROPERTIES PUBLIC_HEADER "${GGML_PUBLIC_HEADERS}")

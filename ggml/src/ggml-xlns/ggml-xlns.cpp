@@ -15,6 +15,7 @@
 #include "ggml-impl.h"
 #include "ggml-xlns.h"
 
+#define xlns16_ideal
 #include "xlns16.cpp"
 
 #include <string>
@@ -115,6 +116,7 @@ static enum ggml_status ggml_backend_xlns_graph_compute(ggml_backend_t backend, 
 
     // We successfully completed the entire graph!
     return GGML_STATUS_SUCCESS;
+    GGML_UNUSED(backend);
 }
 
 static const struct ggml_backend_i ggml_backend_xlns_i = {
@@ -218,6 +220,7 @@ static bool ggml_backend_xlns_device_supports_op(ggml_backend_dev_t dev, const s
             // This safely forces ggml to fall back to the CPU for these operations.
             return false;
     }
+    GGML_UNUSED(dev);
 }
 
 static const struct ggml_backend_device_i ggml_backend_xlns_device_i = {
@@ -261,6 +264,7 @@ static ggml_backend_dev_t ggml_backend_xlns_reg_get_device(ggml_backend_reg_t re
     };
 
     return &ggml_backend_xlns_device;
+    GGML_UNUSED(index);
 }
 
 static const struct ggml_backend_reg_i ggml_backend_xlns_reg_i = {
@@ -285,4 +289,4 @@ ggml_backend_reg_t ggml_backend_xlns_reg(void) {
     return &ggml_backend_xlns_reg;
 }
 
-GGML_BACKEND_DL_IMPL(ggml_backend_xlns_reg); // For dynamic linking
+GGML_BACKEND_DL_IMPL(ggml_backend_xlns_reg) // For dynamic linking

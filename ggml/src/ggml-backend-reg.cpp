@@ -26,6 +26,11 @@
 #endif
 
 // Backend registry
+#ifdef GGML_USE_XLNS
+#include "ggml-xlns.h"
+#pragma message("XLNS backend enabled")
+#endif
+
 #ifdef GGML_USE_CPU
 #include "ggml-cpu.h"
 #endif
@@ -109,6 +114,9 @@ struct ggml_backend_registry {
     std::vector<ggml_backend_dev_t> devices;
 
     ggml_backend_registry() {
+#ifdef GGML_USE_XLNS
+        register_backend(ggml_backend_xlns_reg());
+#endif
 #ifdef GGML_USE_CUDA
         register_backend(ggml_backend_cuda_reg());
 #endif
@@ -543,7 +551,8 @@ void ggml_backend_load_all_from_path(const char * dir_path) {
 #else
     bool silent = false;
 #endif
-
+    // ---> ADD XLNS FIRST (Highest Priority) <---
+    ggml_backend_load_best("xlns", silent, dir_path);
     ggml_backend_load_best("blas", silent, dir_path);
     ggml_backend_load_best("zendnn", silent, dir_path);
     ggml_backend_load_best("cann", silent, dir_path);
