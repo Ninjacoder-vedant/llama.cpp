@@ -1,3 +1,15 @@
+// New backend for GGML that uses XLNS16 ops
+// Copyright (c) 2026 Vedant Acharya
+
+// Description:
+//   A virtual hardware backend for ggml that implements the Logarithmic Number 
+//   System (LNS). This backend intercepts standard floating-point operations 
+//   (specifically GGML_OP_MUL_MAT) and processes them using 16-bit 
+//   LNS arithmetic via the xlnscpp library. 
+// 
+//   This serves as a software Proof of Concept (PoC) for LNS-based Large 
+//   Language Model inference.
+
 #include "ggml-backend-impl.h"
 #include "ggml.h"
 #include "ggml-impl.h"
