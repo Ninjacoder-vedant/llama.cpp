@@ -101,14 +101,22 @@ static enum ggml_status ggml_backend_xlns_graph_compute(ggml_backend_t backend, 
                 break;
             }
 
-            case GGML_OP_ADD: {
-                // You would put a similarly simple 1D array loop here for addition
+            case GGML_OP_NONE:
+            case GGML_OP_RESHAPE:
+            case GGML_OP_VIEW:
+            case GGML_OP_PERMUTE:
+            case GGML_OP_TRANSPOSE:
                 break;
-            }
+
+            // case GGML_OP_ADD: {
+            //     // You would put a similarly simple 1D array loop here for addition
+            //     break;
+            // }
 
             default: {
                 // If ggml somehow hands us an operation we didn't authorize in 
                 // supports_op, fail gracefully.
+                printf("[XLNS FATAL] Unhandled operation routed to backend: %s\n", ggml_op_name(node->op));
                 return GGML_STATUS_FAILED;
             }
         }
@@ -142,14 +150,12 @@ static const char * ggml_backend_xlns_device_get_name(ggml_backend_dev_t dev) {
     GGML_UNUSED(dev);
 }
 
-struct ggml_backend_cpu_device_context {
-    std::string description = "xlns16 Virtual Machine";
-};
+// struct ggml_backend_cpu_device_context {
+//     std::string description = "xlns16 Virtual Machine";
+// };
 
 static const char * ggml_backend_xlns_device_get_description(ggml_backend_dev_t dev) {
-    struct ggml_backend_cpu_device_context * ctx = (struct ggml_backend_cpu_device_context *) dev->context;
-
-    return ctx->description.c_str();
+    return "xlns16 Virtual Machine";
 }
 
 static void ggml_backend_xlns_device_get_memory(ggml_backend_dev_t dev, size_t * free, size_t * total) {
@@ -172,7 +178,7 @@ static void ggml_backend_xlns_device_get_memory(ggml_backend_dev_t dev, size_t *
 }
 
 static enum ggml_backend_dev_type ggml_backend_xlns_device_get_type(ggml_backend_dev_t dev) {
-    return GGML_BACKEND_DEVICE_TYPE_CPU;
+    return GGML_BACKEND_DEVICE_TYPE_ACCEL;
 
     GGML_UNUSED(dev);
 }
@@ -191,7 +197,7 @@ static ggml_backend_t ggml_backend_xlns_device_init_backend(ggml_backend_dev_t d
     ggml_backend_t xlns_backend = new ggml_backend{
         /* .guid    = */ ggml_backend_xlns_guid(),
         /* .iface   = */ ggml_backend_xlns_i,
-        /* .device  = */ ggml_backend_reg_dev_get(ggml_backend_xlns_reg(), 0),
+        /* .device  = */ dev,
         /* .context = */ NULL,  // No need for context state for now
     };
     return xlns_backend;
@@ -201,19 +207,18 @@ static ggml_backend_t ggml_backend_xlns_device_init_backend(ggml_backend_dev_t d
 }
 
 static bool ggml_backend_xlns_device_supports_op(ggml_backend_dev_t dev, const struct ggml_tensor * op) {
+
     // Only accept the math operations that are actually coded in LNS compute graph
     switch (op->op) {
-        case GGML_OP_MUL_MAT:
-        case GGML_OP_ADD:
-            // case GGML_OP_MUL: // Uncomment if you add element-wise multiplication
+        case GGML_OP_NONE:
+        case GGML_OP_RESHAPE:
+        case GGML_OP_VIEW:
+        case GGML_OP_PERMUTE:
+        case GGML_OP_TRANSPOSE:
+            return true;
 
-            // Safety check: For Phase 1 of your PoC, only accept the math if
-            // the model data being passed in is standard 32-bit floats.
-            // (You will intercept and convert these F32s to LNS inside your buffer).
-            if (op->type == GGML_TYPE_F32 && op->src[0]->type == GGML_TYPE_F32 && op->src[1]->type == GGML_TYPE_F32) {
-                return true;
-            }
-            return false;
+        case GGML_OP_MUL_MAT:
+            return op->type == GGML_TYPE_F32 && op->src[0]->type == GGML_TYPE_F32 && op->src[1]->type == GGML_TYPE_F32;        
 
         default:
             // For EVERYTHING ELSE (Softmax, RMSNorm, Log, SiLU, etc.) return FALSE!
@@ -223,18 +228,44 @@ static bool ggml_backend_xlns_device_supports_op(ggml_backend_dev_t dev, const s
     GGML_UNUSED(dev);
 }
 
+static bool ggml_backend_xlns_device_supports_buft(ggml_backend_dev_t dev, ggml_backend_buffer_type_t buft) {
+    return ggml_backend_buft_is_host(buft);
+
+    GGML_UNUSED(dev);
+}
+
+static ggml_backend_buffer_t ggml_backend_xlns_device_buffer_from_host_ptr(ggml_backend_dev_t dev, void * ptr, size_t size, size_t max_tensor_size) {
+    return ggml_backend_cpu_buffer_from_ptr(ptr, size);
+
+    GGML_UNUSED(dev);
+    GGML_UNUSED(max_tensor_size);
+}
+
+static void ggml_backend_xlns_device_get_props(ggml_backend_dev_t dev, struct ggml_backend_dev_props * props) {
+    props->name        = ggml_backend_xlns_device_get_name(dev);
+    props->description = ggml_backend_xlns_device_get_description(dev);
+    props->type        = ggml_backend_xlns_device_get_type(dev);
+    ggml_backend_xlns_device_get_memory(dev, &props->memory_free, &props->memory_total);
+    props->caps = {
+        /* .async                 = */ false,
+        /* .host_buffer           = */ false,
+        /* .buffer_from_host_ptr  = */ true,
+        /* .events                = */ false,
+    };
+}
+
 static const struct ggml_backend_device_i ggml_backend_xlns_device_i = {
     /* .get_name             = */ ggml_backend_xlns_device_get_name,
     /* .get_description      = */ ggml_backend_xlns_device_get_description,
     /* .get_memory           = */ ggml_backend_xlns_device_get_memory,
     /* .get_type             = */ ggml_backend_xlns_device_get_type,
-    /* .get_props            = */ NULL,
+    /* .get_props            = */ ggml_backend_xlns_device_get_props,
     /* .init_backend         = */ ggml_backend_xlns_device_init_backend,
-    /* .get_buffer_type      = */ [](ggml_backend_dev_t dev) { return (ggml_backend_buffer_type_t) dev->context; },
+    /* .get_buffer_type      = */ [](ggml_backend_dev_t) { return ggml_backend_cpu_buffer_type(); },
     /* .get_host_buffer_type = */ NULL,
-    /* .buffer_from_host_ptr = */ NULL,
+    /* .buffer_from_host_ptr = */ ggml_backend_xlns_device_buffer_from_host_ptr,
     /* .supports_op          = */ ggml_backend_xlns_device_supports_op,
-    /* .supports_buft        = */ [](ggml_backend_dev_t, ggml_backend_buffer_type_t) { return true; },
+    /* .supports_buft        = */ ggml_backend_xlns_device_supports_buft,
     /* .offload_op           = */ NULL,
     /* .event_new            = */ NULL,
     /* .event_free           = */ NULL,
@@ -256,6 +287,8 @@ static size_t ggml_backend_xlns_reg_get_device_count(ggml_backend_reg_t reg) {
 }
 
 static ggml_backend_dev_t ggml_backend_xlns_reg_get_device(ggml_backend_reg_t reg, size_t index) {
+    GGML_ASSERT(index == 0);
+
     // We use 'static' so the device persists in memory for the life of the program
     static struct ggml_backend_device ggml_backend_xlns_device = {
         /* .iface   = */ ggml_backend_xlns_device_i,  // The device contract we made earlier
@@ -264,6 +297,8 @@ static ggml_backend_dev_t ggml_backend_xlns_reg_get_device(ggml_backend_reg_t re
     };
 
     return &ggml_backend_xlns_device;
+
+    GGML_UNUSED(reg);
     GGML_UNUSED(index);
 }
 
