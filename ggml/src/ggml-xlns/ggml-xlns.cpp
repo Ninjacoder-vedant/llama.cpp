@@ -1,0 +1,276 @@
+#include "ggml-backend-impl.h"
+#include "ggml.h"
+#include "ggml-impl.h"
+#include "ggml-xlns.h"
+
+#include "xlns16.cpp"
+
+#include <string>
+
+#if defined(_WIN32)
+#    define WIN32_LEAN_AND_MEAN
+#    ifndef NOMINMAX
+#        define NOMINMAX
+#    endif
+#    include <windows.h>
+#else
+#    include <unistd.h>
+#endif
+
+static const char * ggml_backend_xlns_get_name(ggml_backend_t backend) {
+    return "xlns";
+
+    GGML_UNUSED(backend);
+}
+
+static void ggml_backend_xlns_free(ggml_backend_t backend) {
+    delete backend; // There's no context so only backend should be freed
+} 
+
+static enum ggml_status ggml_backend_xlns_graph_compute(ggml_backend_t backend, struct ggml_cgraph * cgraph) {
+    
+    // Iterate through every operation in the computation graph linearly
+    for (int node_idx = 0; node_idx < cgraph->n_nodes; node_idx++) {
+        struct ggml_tensor * node = cgraph->nodes[node_idx];
+
+        switch (node->op) {
+            case GGML_OP_MUL_MAT: {
+                printf("\n>>> SUCCESS: LNS Matrix Multiplication Intercepted! <<<\n");
+                
+                // 1. EXTRACT TENSORS
+                // In ggml, src0 is Matrix A (Weights), src1 is Matrix B (Tokens)
+                // The 'node' itself acts as the destination tensor (Matrix C)
+                const struct ggml_tensor * src0 = node->src[0]; 
+                const struct ggml_tensor * src1 = node->src[1]; 
+                struct ggml_tensor * dst        = node;         
+
+                // 2. EXTRACT DIMENSIONS
+                // ggml ne[0] is the inner dimension (columns), ne[1] is rows.
+                const int64_t K = src0->ne[0]; // Number of columns in A (and rows in B)
+                const int64_t M = src0->ne[1]; // Number of rows in A
+                const int64_t N = src1->ne[1]; // Number of columns in B (Batch size)
+
+                // 3. GET RAW MEMORY POINTERS
+                // For this simplest PoC, we assume the data is standard 32-bit floats.
+                // (If you successfully convert them in Phase 2, you'd cast to xlns16_float* here)
+                const float * data_A = (const float *) src0->data;
+                const float * data_B = (const float *) src1->data;
+                float       * data_C = (float *)       dst->data;
+
+                // 4. THE LNS MATH LOOP (Single-Threaded)
+                // We iterate through the output matrix dimensions
+                for (int64_t j = 0; j < N; ++j) {       // Columns of output
+                    for (int64_t i = 0; i < M; ++i) {   // Rows of output
+                        
+                        // Initialize xlnscpp accumulator
+                        xlns16_float sum_lns;
+                        sum_lns = 0.0f; 
+
+                        // The Dot Product
+                        for (int64_t k = 0; k < K; ++k) {
+                            
+                            // Map 2D coordinates to 1D array indices (Row-Major Order)
+                            float a_val = data_A[i * K + k]; 
+                            float b_val = data_B[j * K + k]; 
+
+                            // Convert standard FP32 to xlns16_float via overloaded assignment
+                            xlns16_float a_lns; a_lns = a_val;
+                            xlns16_float b_lns; b_lns = b_val;
+
+                            // Perform LNS multiplication and addition
+                            sum_lns += (a_lns * b_lns); 
+                        }
+
+                        // Convert LNS result back to FP32 and store in output tensor
+                        data_C[j * M + i] = xlns16_2float(sum_lns);
+                    }
+                }
+                break;
+            }
+
+            case GGML_OP_ADD: {
+                // You would put a similarly simple 1D array loop here for addition
+                break;
+            }
+
+            default: {
+                // If ggml somehow hands us an operation we didn't authorize in 
+                // supports_op, fail gracefully.
+                return GGML_STATUS_FAILED;
+            }
+        }
+    }
+
+    // We successfully completed the entire graph!
+    return GGML_STATUS_SUCCESS;
+}
+
+static const struct ggml_backend_i ggml_backend_xlns_i = {
+    /* .get_name                = */ ggml_backend_xlns_get_name,
+    /* .free                    = */ ggml_backend_xlns_free,
+    /* .set_tensor_async        = */ NULL,
+    /* .get_tensor_async        = */ NULL,
+    /* .cpy_tensor_async        = */ NULL,
+    /* .synchronize             = */ NULL,
+    /* .graph_plan_create       = */ NULL,
+    /* .graph_plan_free         = */ NULL,
+    /* .graph_plan_update       = */ NULL,
+    /* .graph_plan_compute      = */ NULL,
+    /* .graph_compute           = */ ggml_backend_xlns_graph_compute,
+    /* .event_record            = */ NULL,
+    /* .event_wait              = */ NULL,
+    /* .graph_optimize          = */ NULL,
+};
+
+static const char * ggml_backend_xlns_device_get_name(ggml_backend_dev_t dev) {
+    return "xlns";
+
+    GGML_UNUSED(dev);
+}
+
+struct ggml_backend_cpu_device_context {
+    std::string description = "xlns16 Virtual Machine";
+};
+
+static const char * ggml_backend_xlns_device_get_description(ggml_backend_dev_t dev) {
+    struct ggml_backend_cpu_device_context * ctx = (struct ggml_backend_cpu_device_context *) dev->context;
+
+    return ctx->description.c_str();
+}
+
+static void ggml_backend_xlns_device_get_memory(ggml_backend_dev_t dev, size_t * free, size_t * total) {
+#ifdef _WIN32
+    MEMORYSTATUSEX status;
+    status.dwLength = sizeof(status);
+    GlobalMemoryStatusEx(&status);
+    *total = status.ullTotalPhys;
+    *free  = status.ullAvailPhys;
+#else
+    long pages     = sysconf(_SC_PHYS_PAGES);
+    long page_size = sysconf(_SC_PAGE_SIZE);
+    *total         = pages * page_size;
+
+    // "free" system memory is ill-defined, for practical purposes assume that all of it is free:
+    *free = *total;
+#endif  // _WIN32
+
+    GGML_UNUSED(dev);
+}
+
+static enum ggml_backend_dev_type ggml_backend_xlns_device_get_type(ggml_backend_dev_t dev) {
+    return GGML_BACKEND_DEVICE_TYPE_CPU;
+
+    GGML_UNUSED(dev);
+}
+
+static ggml_guid_t ggml_backend_xlns_guid(void) {
+    // A completely unique, randomly generated 16-byte ID for the LNS backend.
+    static ggml_guid guid = { 0xab, 0xcd, 0xef, 0x12, 0x34, 0x56, 0x78, 0x9a,
+                              0xbc, 0xde, 0xf1, 0x23, 0x45, 0x67, 0x89, 0xab };
+    return &guid;
+}
+
+static ggml_backend_t ggml_backend_xlns_device_init_backend(ggml_backend_dev_t dev, const char * params) {
+    // can init xlns backend now to avoid slowing the first graph computation
+    // xlns_init()
+
+    ggml_backend_t xlns_backend = new ggml_backend{
+        /* .guid    = */ ggml_backend_xlns_guid(),
+        /* .iface   = */ ggml_backend_xlns_i,
+        /* .device  = */ ggml_backend_reg_dev_get(ggml_backend_xlns_reg(), 0),
+        /* .context = */ NULL,  // No need for context state for now
+    };
+    return xlns_backend;
+
+    GGML_UNUSED(dev);
+    GGML_UNUSED(params);
+}
+
+static bool ggml_backend_xlns_device_supports_op(ggml_backend_dev_t dev, const struct ggml_tensor * op) {
+    // Only accept the math operations that are actually coded in LNS compute graph
+    switch (op->op) {
+        case GGML_OP_MUL_MAT:
+        case GGML_OP_ADD:
+            // case GGML_OP_MUL: // Uncomment if you add element-wise multiplication
+
+            // Safety check: For Phase 1 of your PoC, only accept the math if
+            // the model data being passed in is standard 32-bit floats.
+            // (You will intercept and convert these F32s to LNS inside your buffer).
+            if (op->type == GGML_TYPE_F32 && op->src[0]->type == GGML_TYPE_F32 && op->src[1]->type == GGML_TYPE_F32) {
+                return true;
+            }
+            return false;
+
+        default:
+            // For EVERYTHING ELSE (Softmax, RMSNorm, Log, SiLU, etc.) return FALSE!
+            // This safely forces ggml to fall back to the CPU for these operations.
+            return false;
+    }
+}
+
+static const struct ggml_backend_device_i ggml_backend_xlns_device_i = {
+    /* .get_name             = */ ggml_backend_xlns_device_get_name,
+    /* .get_description      = */ ggml_backend_xlns_device_get_description,
+    /* .get_memory           = */ ggml_backend_xlns_device_get_memory,
+    /* .get_type             = */ ggml_backend_xlns_device_get_type,
+    /* .get_props            = */ NULL,
+    /* .init_backend         = */ ggml_backend_xlns_device_init_backend,
+    /* .get_buffer_type      = */ [](ggml_backend_dev_t dev) { return (ggml_backend_buffer_type_t) dev->context; },
+    /* .get_host_buffer_type = */ NULL,
+    /* .buffer_from_host_ptr = */ NULL,
+    /* .supports_op          = */ ggml_backend_xlns_device_supports_op,
+    /* .supports_buft        = */ [](ggml_backend_dev_t, ggml_backend_buffer_type_t) { return true; },
+    /* .offload_op           = */ NULL,
+    /* .event_new            = */ NULL,
+    /* .event_free           = */ NULL,
+    /* .event_synchronize    = */ NULL,
+};
+
+static const char * ggml_backend_xlns_reg_get_name(ggml_backend_reg_t reg) {
+    return "xlns";
+
+    // included in ggml.h, because reg is not used, compiler may give warning so this is to suppress the warning
+    GGML_UNUSED(reg);
+}
+
+static size_t ggml_backend_xlns_reg_get_device_count(ggml_backend_reg_t reg) {
+    // We only have 1 virtual LNS device running on the CPU
+    return 1;
+
+    GGML_UNUSED(reg);
+}
+
+static ggml_backend_dev_t ggml_backend_xlns_reg_get_device(ggml_backend_reg_t reg, size_t index) {
+    // We use 'static' so the device persists in memory for the life of the program
+    static struct ggml_backend_device ggml_backend_xlns_device = {
+        /* .iface   = */ ggml_backend_xlns_device_i,  // The device contract we made earlier
+        /* .reg     = */ reg,
+        /* .context = */ NULL,                        // You can link your buffer type here if needed (Just a cpu model)
+    };
+
+    return &ggml_backend_xlns_device;
+}
+
+static const struct ggml_backend_reg_i ggml_backend_xlns_reg_i = {
+    /* .get_name         = */ ggml_backend_xlns_reg_get_name,
+    /* .get_device_count = */ ggml_backend_xlns_reg_get_device_count,
+    /* .get_device       = */ ggml_backend_xlns_reg_get_device,
+    /* .get_proc_address = */ NULL,  // Not needed for our LNS PoC
+};
+
+// The Main Initialization Function
+ggml_backend_reg_t ggml_backend_xlns_reg(void) {
+    // If xlnscpp requires any one-time setup (like generating lookup tables),
+    // we can call that init function right here.
+    // xlns_init();
+
+    static struct ggml_backend_reg ggml_backend_xlns_reg = {
+        /* .api_version = */ GGML_BACKEND_API_VERSION,
+        /* .iface       = */ ggml_backend_xlns_reg_i,
+        /* .context     = */ NULL,
+    };
+
+    return &ggml_backend_xlns_reg;
+}
+
+GGML_BACKEND_DL_IMPL(ggml_backend_xlns_reg); // For dynamic linking
